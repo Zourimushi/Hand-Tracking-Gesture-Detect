@@ -50,7 +50,7 @@ class gestureDetector:
         # ===== 新增：手势检测相关变量 =====
         # 存储最近的手部中心点位置（用于检测移动方向）
         self.hand_positions_history = {}
-        self.history_length = 4  # 保存最近4帧的位置
+        self.history_length = 10  # 保存最近10帧的位置
 
         # 手势检测参数
         self.gesture_cooldown = 0.5  # 手势触发冷却时间（秒）
@@ -59,11 +59,9 @@ class gestureDetector:
         self.wait_for_reset = False
 
         # 移动阈值（像素）
-        self.move_threshold = 15
+        self.move_threshold = 30
         #速度阈值（像素/秒）
-        self.velocity_threshold = 150
-        self.reset_velocity = 100          # 恢复阈值
-
+        self.velocity_threshold = 200
 
         # 用于平滑检测的队列
         self.gesture_history = deque(maxlen=5)
@@ -218,115 +216,93 @@ class gestureDetector:
 
         self.hand_positions_history[hand_id].append({"pos": center,"time": time.time()})
 
-        # # 计算手的大小（手腕到中指指尖的距离）
-        # if detection_result.hand_landmarks:
-        #     hand_landmarks = detection_result.hand_landmarks[0]
-        #     wrist = hand_landmarks[0]
-        #     middle_tip = hand_landmarks[12]  # 中指指尖
-        #     h, w = frame_shape[:2]
+        # 计算手的大小（手腕到中指指尖的距离）
+        if detection_result.hand_landmarks:
+            hand_landmarks = detection_result.hand_landmarks[0]
+            wrist = hand_landmarks[0]
+            middle_tip = hand_landmarks[12]  # 中指指尖
+            h, w = frame_shape[:2]
 
-        #     # 计算欧几里得距离
-        #     dx = (middle_tip.x - wrist.x) * w
-        #     dy = (middle_tip.y - wrist.y) * h
-        #     hand_size = np.sqrt(dx * dx + dy * dy)
-        #     self.hand_size_history[hand_id].append(hand_size)
+            # 计算欧几里得距离
+            dx = (middle_tip.x - wrist.x) * w
+            dy = (middle_tip.y - wrist.y) * h
+            hand_size = np.sqrt(dx * dx + dy * dy)
+            self.hand_size_history[hand_id].append(hand_size)
 
-        history = self.hand_positions_history[hand_id]
+        # 如果历史数据不足，无法判断手势
+        if len(self.hand_positions_history[hand_id]) < self.history_length // 2:
+            return '检测中...', 'none'
 
-        if len(history) < 4:
+        # 获取位置历史以及时间差
+        history = list(self.hand_positions_history[hand_id])
+
+        start = history[0]
+        end = history[-1]
+
+        start_pos = start["pos"]
+        end_pos = end["pos"]
+
+        elapsed = end["time"] - start["time"]
+
+        # 计算位移
+        dx = end_pos[0] - start_pos[0]
+        dy = end_pos[1] - start_pos[1]
+
+        # 计算总位移距离
+        distance = np.sqrt(dx * dx + dy * dy)
+        if elapsed <= 0:
             return "检测中...", "none"
 
-        # -------------------------
-        # 计算最近3帧速度
-        # -------------------------
+        velocity = distance / elapsed
+        print(
+            f"distance={distance:.1f} "
+            f"time={elapsed:.2f}s "
+            f"velocity={velocity:.1f}"
+        )
+        # # 获取手的大小变化
+        # size_history = list(self.hand_size_history[hand_id])
+        # if len(size_history) >= self.history_length // 2:
+        #     start_size = size_history[0]
+        #     end_size = size_history[-1]
+        #     size_change = end_size - start_size
+        #
+        #     # 如果水平垂直位移都很小，但手的大小变化明显
+        #     if distance < self.move_threshold * 1.5:
+        #         # 手变大 -> 前推（手靠近摄像头）
+        #         if size_change > 15:  # 大小增加阈值
+        #             return '向前推', 'forward'
+        #         # 手变小 -> 后拉（手远离摄像头）
+        #         elif size_change < -15:  # 大小减少阈值
+        #             return '向后拉', 'backward'
 
-        velocities = []
-
-        for i in range(len(history)-3, len(history)):
-            p1 = history[i-1]
-            p2 = history[i]
-
-            dx = p2["pos"][0] - p1["pos"][0]
-            dy = p2["pos"][1] - p1["pos"][1]
-
-            dt = p2["time"] - p1["time"]
-
-            if dt <= 0:
-                continue
-
-            distance = np.sqrt(dx*dx + dy*dy)
-
-            velocity = distance / dt
-
-            velocities.append({
-                "velocity": velocity,
-                "dx": dx,
-                "dy": dy
-            })
-
-        if len(velocities) == 0:
-            return "检测中...", "none"
-
-        # -------------------------
-        # 最近3帧平均速度
-        # -------------------------
-
-        avg_velocity = sum(v["velocity"] for v in velocities) / len(velocities)
-
-        avg_dx = sum(v["dx"] for v in velocities)
-
-        avg_dy = sum(v["dy"] for v in velocities)
-
-        print(f"velocity={avg_velocity:.1f}")
-
-        # -------------------------
-        # 已经触发过
-        # -------------------------
-
-        if self.wait_for_reset:
-
-            if avg_velocity < self.reset_velocity:
-                self.wait_for_reset = False
-
-            return "等待恢复", "none"
-
-        # -------------------------
-        # 速度不够/移动距离不够
-        # -------------------------
-
-        if avg_velocity < self.velocity_threshold:
-            return "移动过慢", "none"
+        # 如果位移太小，认为是静止
         if distance < self.move_threshold:
-            return "移动距离过短", "none"
+            self.wait_for_reset = False
+            return '静止', 'none'
+        if velocity < self.velocity_threshold:
+            self.wait_for_reset = False
+            return "移动过慢", "none"
 
-        # -------------------------
-        # 判断方向
-        # -------------------------
-
-        if abs(avg_dx) > abs(avg_dy):
-
-            if avg_dx > 0:
-                direction = "right"
-                gesture_name = "向右滑动"
+        # 判断主要方向（左右上下）
+        if abs(dx) > abs(dy):
+            # 水平方向
+            if dx > 0:
+                direction = 'right'
+                gesture_name = '向右滑动'
             else:
-                direction = "left"
-                gesture_name = "向左滑动"
-
+                direction = 'left'
+                gesture_name = '向左滑动'
         else:
-
-            if avg_dy > 0:
-                direction = "down"
-                gesture_name = "向下滑动"
+            # 垂直方向
+            if dy > 0:
+                direction = 'down'
+                gesture_name = '向下滑动'
             else:
-                direction = "up"
-                gesture_name = "向上滑动"
-
-        # -------------------------
-        # 锁住，等待恢复
-        # -------------------------
-
+                direction = 'up'
+                gesture_name = '向上滑动'
+        if self.wait_for_reset:
+            return "静止", "none"
         self.wait_for_reset = True
-
         return gesture_name, direction
 
     def draw_gesture_info(self, frame, detection_result, frame_shape):
