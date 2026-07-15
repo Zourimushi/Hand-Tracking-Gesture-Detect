@@ -1,0 +1,6 @@
+0:fist
+1:thumbUp
+2:victory
+3:rock
+4:thumbDown
+5:plam
