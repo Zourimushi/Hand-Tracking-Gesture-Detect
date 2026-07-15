@@ -9,7 +9,7 @@ from sklearn.model_selection import train_test_split
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 CLASSIFIER_DIR = os.path.dirname(CURRENT_DIR)
-DEFAULT_DATASET_DIR = os.path.join(CLASSIFIER_DIR, "dataset")
+DEFAULT_DATASET_DIR = os.path.join(CLASSIFIER_DIR, "dataset_gesture")
 
 TRAIN_RATIO = 0.7
 VAL_RATIO = 0.15

@@ -27,7 +27,9 @@ class gestureDetector:
         self.min_hand_detection_confidence = min_hand_detection_confidence
         self.min_tracking_confidence = min_tracking_confidence
 
-        self.predictor = GesturePredictor(model_type="mlp")
+        self.predictor_number = GesturePredictor(model_type="mlp")
+        self.predictor_gesture = GesturePredictor(model_type="svm", model_name="svm_model_gesture")
+
 
         # 创建手部检测器
         base_options = python.BaseOptions(
@@ -77,9 +79,12 @@ class gestureDetector:
         # 用于平滑检测的队列
         self.gesture_history = deque(maxlen=5)
         # 用于预测投票
-        self.prediction_history = []
+        self.number_prediction_history = []
+        self.gesture_prediction_history = []
+
         self.vote_size = 10
-        self.lastest=None
+        self.lastest_number=None
+        self.lastest_gesture=None
 
         print("手势识别已初始化！")
         print("支持手势: 左滑, 右滑, 上滑, 下滑, 前推, 后拉")
@@ -361,7 +366,11 @@ class gestureDetector:
 
         return gesture_name, direction
     
-    def classify_hands(self, detection_result):
+    def classify_hands(self, detection_result,predictor=None,prediction_history=None):
+        if predictor is None:
+            predictor = self.predictor_number
+        if prediction_history is None:
+            prediction_history = self.number_prediction_history if predictor == self.predictor_number else self.gesture_prediction_history
 
         if not detection_result.hand_landmarks:
             return None
@@ -380,7 +389,7 @@ class gestureDetector:
             if hasattr(detection_result, "handedness"):
                 handedness = detection_result.handedness[i][0].category_name
 
-            gesture, confidence = self.predictor.predict(
+            gesture, confidence = predictor.predict(
                 {
                     "landmarks": landmarks,
                     "handedness": handedness
@@ -394,14 +403,14 @@ class gestureDetector:
             })
 
         # 保存这一帧
-        self.prediction_history.append(frame_predictions)
+        prediction_history.append(frame_predictions)
 
         # 不足10帧
-        if len(self.prediction_history) < self.vote_size:
+        if len(prediction_history) < self.vote_size:
             return None
 
-        result = self.vote_predictions(self.prediction_history)
-        self.prediction_history.pop(0)        # print("投票结果:", result)
+        result = self.vote_predictions(prediction_history)
+        prediction_history.pop(0)        # print("投票结果:", result)
         return result
     
     def vote_predictions(self, history):
@@ -544,6 +553,44 @@ class gestureDetector:
                     (0,255,255),
                     2
                 )
+    def draw_predictions(self, frame, number_predictions=None, gesture_predictions=None):
+        if number_predictions:
+            self.lastest_number = number_predictions  # 获取最新的数字预测结果
+        if gesture_predictions:
+            self.lastest_gesture = gesture_predictions  # 获取最新的手势预测结果
+        gesture_map = {
+            0:"fist",
+            1:"thumbs_up",
+            2:"victory",
+            3:"rock",
+            4:"thumbs_down",
+            5:"palm"
+            }
+        # 显示数字预测结果
+        if self.lastest_number:
+            for i, pred in enumerate(self.lastest_number):
+                cv2.putText(
+                    frame,
+                    f'{pred["handedness"]}: {pred["gesture"]} ({pred["confidence"]:.2f})',
+                    (20, 80 + i * 30),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (0,255,255),
+                    2
+                )
+
+        # 显示手势预测结果
+        if self.lastest_gesture:
+            for i, pred in enumerate(self.lastest_gesture):
+                cv2.putText(
+                    frame,
+                    f'{pred["handedness"]}: {gesture_map.get(pred["gesture"], "Unknown")} ({pred["confidence"]:.2f})',
+                    (20, 150 + i * 30),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (0,255,255),
+                    2
+                )
 
     def process_frame(self):
         """处理单帧图像"""
@@ -559,13 +606,18 @@ class gestureDetector:
         positions = self.get_finger_positions(detection_result, frame.shape)
 
         self.draw_hand_landmarks(annotated_frame, detection_result)
-        predictions = self.classify_hands(detection_result)
-        # if predictions:
-        #     print("结果:", predictions)
+        number_predictions = self.classify_hands(detection_result, predictor=self.predictor_number)
+        gesture_predictions = self.classify_hands(detection_result, predictor=self.predictor_gesture)
 
-        self.draw_finger_info(annotated_frame, detection_result,
-                              finger_counts, finger_statuses, predictions)
+
+        # if number_predictions:
+        #     print("数字预测结果:", number_predictions)
+        # if gesture_predictions:
+        #     print("手势预测结果:", gesture_predictions)
+
+        #self.draw_finger_info(annotated_frame, detection_result,finger_counts, finger_statuses, gesture_predictions)
         gesture_direction = self.draw_gesture_info(annotated_frame, detection_result, frame.shape)
+        self.draw_predictions(annotated_frame, number_predictions=number_predictions, gesture_predictions=gesture_predictions)
         cv2.imshow("Hand Tracking", annotated_frame)
         cv2.waitKey(1)
 
@@ -575,7 +627,8 @@ class gestureDetector:
         "finger_counts": finger_counts,
         "finger_statuses": finger_statuses,
         "detection_result": detection_result,
-        "predictions": predictions,
+        "number_predictions": number_predictions,
+        "gesture_predictions": gesture_predictions,
         "hand_count": hand_count
     }
     def run(self, camera_id=0, window_name='Hand Tracking',
@@ -620,10 +673,11 @@ class gestureDetector:
                 draw_landmarks=True,
                 draw_indices=show_indices
             )
-            predictions = self.classify_hands(detection_result)
+            number_predictions = self.classify_hands(detection_result, predictor=self.predictor_number)
+            gesture_predictions = self.classify_hands(detection_result, predictor=self.predictor_gesture)            
             if show_info:
-                self.draw_finger_info(annotated_frame, detection_result,
-                                      finger_counts, finger_statuses, predictions)
+                #self.draw_finger_info(annotated_frame, detection_result,finger_counts, finger_statuses, number_predictions)
+                self.draw_predictions(annotated_frame, number_predictions=number_predictions, gesture_predictions=gesture_predictions)
 
             # 检测并显示手势
             gesture_direction = self.draw_gesture_info(annotated_frame, detection_result, frame.shape)

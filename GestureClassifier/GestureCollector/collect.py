@@ -19,7 +19,7 @@ sys.path.insert(0, PYTHONSERVER_DIR)
 
 from Gesture_Detect.gesture_detector import gestureDetector
 
-SAVE_PATH = os.path.join(GESTURE_DETECT_DIR, "GestureClassifier","dataset", "raw.csv")
+SAVE_PATH = os.path.join(GESTURE_DETECT_DIR, "GestureClassifier","dataset_gesture", "raw.csv")
 SAVE_INTERVAL = 0.3
 AUTO_SAVE_COUNT = 100
 AUTO_SAVE_FRAME_INTERVAL = 3
