@@ -58,6 +58,11 @@ class gestureDetector:
             'gesture_text': (0, 255, 255)
         }
         self.cap = cv2.VideoCapture(camera_id)
+        # 用于平滑关键点
+        self.smooth_landmarks = {}
+        # EMA参数
+        self.alpha = 0.3
+
         # ===== 新增：手势检测相关变量 =====
         # 存储最近的手部中心点位置（用于检测移动方向）
         self.hand_positions_history = {}
@@ -86,6 +91,8 @@ class gestureDetector:
         self.lastest_number=None
         self.lastest_gesture=None
 
+
+
         print("手势识别已初始化！")
         print("支持手势: 左滑, 右滑, 上滑, 下滑, 前推, 后拉")
 
@@ -96,19 +103,50 @@ class gestureDetector:
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
         detection_result = self.detector.detect(mp_image)
-        return frame, detection_result
+        smoothed_hands = {}
 
-    def draw_hand_landmarks(self, frame, detection_result, draw_connections=True,
+        for hand_id, hand_landmarks in enumerate(detection_result.hand_landmarks):
+            handedness = detection_result.handedness[hand_id][0].category_name
+
+            points = np.array(
+                [[lm.x, lm.y, lm.z] for lm in hand_landmarks],
+                dtype=np.float32
+            )
+
+            points = self.smooth_hand_landmarks(
+                handedness,
+                points
+            )
+
+            smoothed_hands[handedness] = points
+
+        return frame, detection_result, smoothed_hands
+    def smooth_hand_landmarks(self, handedness, landmarks):
+        """
+        landmarks: numpy数组 (21,3)
+        """
+
+        if handedness not in self.smooth_landmarks:
+            self.smooth_landmarks[handedness] = landmarks.copy()
+        else:
+            self.smooth_landmarks[handedness] = (
+                self.alpha * landmarks +
+                (1 - self.alpha) * self.smooth_landmarks[handedness]
+            )
+
+        return self.smooth_landmarks[handedness]
+
+    def draw_hand_landmarks(self, frame, detection_result, smooth_landmarks, draw_connections=True,
                             draw_landmarks=True, draw_indices=False):
         """绘制手部关键点和连线"""
-        if detection_result.hand_landmarks:
-            for hand_landmarks in detection_result.hand_landmarks:
+        if smooth_landmarks:
+            for handedness, hand_landmarks in smooth_landmarks.items():
                 h, w, _ = frame.shape
 
                 points = []
                 for landmark in hand_landmarks:
-                    x = int(landmark.x * w)
-                    y = int(landmark.y * h)
+                    x = int(landmark[0] * w)
+                    y = int(landmark[1] * h)
                     points.append((x, y))
 
                 if draw_connections:
@@ -366,16 +404,28 @@ class gestureDetector:
 
         return gesture_name, direction
     
-    def classify_hands(self, detection_result,predictor=None,prediction_history=None):
+    def classify_hands(self, detection_result, smoothed_hands=None, predictor=None, prediction_history=None):
         if predictor is None:
             predictor = self.predictor_number
         if prediction_history is None:
             prediction_history = self.number_prediction_history if predictor == self.predictor_number else self.gesture_prediction_history
-
-        if not detection_result.hand_landmarks:
-            return None
-
+        
         frame_predictions = []
+
+        frame_predictions.append({
+                "handedness": "Right",
+                "gesture": "Unknown",
+                "confidence": None
+            })
+        frame_predictions.append({
+                "handedness": "Left",
+                "gesture": "Unknown",
+                "confidence": None
+            })
+        
+        # if not detection_result.hand_landmarks:
+        #     return None
+
 
         for i, hand_landmarks in enumerate(detection_result.hand_landmarks):
 
@@ -388,6 +438,9 @@ class gestureDetector:
 
             if hasattr(detection_result, "handedness"):
                 handedness = detection_result.handedness[i][0].category_name
+            
+            if smoothed_hands is not None and handedness in smoothed_hands:
+                landmarks = smoothed_hands[handedness]
 
             gesture, confidence = predictor.predict(
                 {
@@ -396,13 +449,13 @@ class gestureDetector:
                 }
             )
 
-            frame_predictions.append({
-                "handedness": handedness,
-                "gesture": gesture,
-                "confidence": confidence
-            })
+            for pred in frame_predictions:
+                if pred["handedness"] == handedness:
+                    pred["gesture"] = gesture
+                    pred["confidence"] = confidence
+                    break
 
-        # 保存这一帧
+        # # 保存这一帧
         prediction_history.append(frame_predictions)
 
         # 不足10帧
@@ -413,6 +466,7 @@ class gestureDetector:
         prediction_history.pop(0)        # print("投票结果:", result)
         return result
     
+
     def vote_predictions(self, history):
 
         left_votes = []
@@ -435,13 +489,20 @@ class gestureDetector:
 
         result = []
 
+        # ---------- Left ----------
         if left_votes:
+
             gesture = Counter(left_votes).most_common(1)[0][0]
 
-            confidence = np.mean([
-                c for g, c in zip(left_votes, left_conf)
-                if g == gesture
-            ])
+            if gesture == "Unknown":
+                confidence = None
+            else:
+                valid_conf = [
+                    c for g, c in zip(left_votes, left_conf)
+                    if g == gesture and c is not None
+                ]
+
+                confidence = np.mean(valid_conf) if valid_conf else None
 
             result.append({
                 "handedness": "Left",
@@ -449,13 +510,20 @@ class gestureDetector:
                 "confidence": confidence
             })
 
+        # ---------- Right ----------
         if right_votes:
+
             gesture = Counter(right_votes).most_common(1)[0][0]
 
-            confidence = np.mean([
-                c for g, c in zip(right_votes, right_conf)
-                if g == gesture
-            ])
+            if gesture == "Unknown":
+                confidence = None
+            else:
+                valid_conf = [
+                    c for g, c in zip(right_votes, right_conf)
+                    if g == gesture and c is not None
+                ]
+
+                confidence = np.mean(valid_conf) if valid_conf else None
 
             result.append({
                 "handedness": "Right",
@@ -546,7 +614,7 @@ class gestureDetector:
             for i, pred in enumerate(self.lastest):
                 cv2.putText(
                     frame,
-                    f'{pred["handedness"]}: {pred["gesture"]} ({pred["confidence"]:.2f})',
+                    f'{pred["handedness"]}: {pred["gesture"]} ({pred["confidence"]})',
                     (20, 80 + i * 30),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.8,
@@ -559,6 +627,7 @@ class gestureDetector:
         if gesture_predictions:
             self.lastest_gesture = gesture_predictions  # 获取最新的手势预测结果
         gesture_map = {
+            "unknown": "unknown",
             0:"fist",
             1:"thumbs_up",
             2:"victory",
@@ -571,7 +640,7 @@ class gestureDetector:
             for i, pred in enumerate(self.lastest_number):
                 cv2.putText(
                     frame,
-                    f'{pred["handedness"]}: {pred["gesture"]} ({pred["confidence"]:.2f})',
+                    f'{pred["handedness"]}: {pred["gesture"]} ({pred["confidence"]})',
                     (20, 80 + i * 30),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.8,
@@ -584,7 +653,7 @@ class gestureDetector:
             for i, pred in enumerate(self.lastest_gesture):
                 cv2.putText(
                     frame,
-                    f'{pred["handedness"]}: {gesture_map.get(pred["gesture"], "Unknown")} ({pred["confidence"]:.2f})',
+                    f'{pred["handedness"]}: {gesture_map.get(pred["gesture"], "Unknown")} ({pred["confidence"]})',
                     (20, 150 + i * 30),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.8,
@@ -600,14 +669,14 @@ class gestureDetector:
             return None, None, None
 
         frame = cv2.flip(frame, 1)  # 翻转图像
-        annotated_frame, detection_result = self.detect_hands(frame)
+        annotated_frame, detection_result, smoothed_hands = self.detect_hands(frame)
         finger_counts, finger_statuses = self.count_fingers(detection_result)
         hand_count = len(detection_result.hand_landmarks)
         positions = self.get_finger_positions(detection_result, frame.shape)
 
-        self.draw_hand_landmarks(annotated_frame, detection_result)
-        number_predictions = self.classify_hands(detection_result, predictor=self.predictor_number)
-        gesture_predictions = self.classify_hands(detection_result, predictor=self.predictor_gesture)
+        self.draw_hand_landmarks(annotated_frame, detection_result, smoothed_hands)
+        number_predictions = self.classify_hands(detection_result, smoothed_hands=smoothed_hands, predictor=self.predictor_number)
+        gesture_predictions = self.classify_hands(detection_result, smoothed_hands=smoothed_hands, predictor=self.predictor_gesture)
 
 
         # if number_predictions:
@@ -662,19 +731,20 @@ class gestureDetector:
                 #frame = cv2.flip(frame, 1)
 
 
-            annotated_frame, detection_result = self.detect_hands(frame)
+            annotated_frame, detection_result, smoothed_hands = self.detect_hands(frame)
             finger_counts, finger_statuses = self.count_fingers(detection_result)
             positions = self.get_finger_positions(detection_result, frame.shape)
 
             self.draw_hand_landmarks(
                 annotated_frame,
                 detection_result,
+                smoothed_hands,
                 draw_connections=show_connections,
                 draw_landmarks=True,
                 draw_indices=show_indices
             )
-            number_predictions = self.classify_hands(detection_result, predictor=self.predictor_number)
-            gesture_predictions = self.classify_hands(detection_result, predictor=self.predictor_gesture)            
+            number_predictions = self.classify_hands(detection_result, smoothed_hands=smoothed_hands, predictor=self.predictor_number)
+            gesture_predictions = self.classify_hands(detection_result, smoothed_hands=smoothed_hands, predictor=self.predictor_gesture)
             if show_info:
                 #self.draw_finger_info(annotated_frame, detection_result,finger_counts, finger_statuses, number_predictions)
                 self.draw_predictions(annotated_frame, number_predictions=number_predictions, gesture_predictions=gesture_predictions)
