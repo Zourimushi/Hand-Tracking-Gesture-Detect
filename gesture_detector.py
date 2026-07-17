@@ -1,3 +1,4 @@
+from asyncio import events
 from unittest import result
 
 import cv2
@@ -7,8 +8,8 @@ from mediapipe.tasks.python import vision
 import numpy as np
 from collections import deque
 from collections import Counter
-
 import time
+
 try:
     from .GestureClassifier.predict import GesturePredictor
 except ImportError:
@@ -69,8 +70,7 @@ class gestureDetector:
         self.history_length = 4  # 保存最近4帧的位置
 
         # 手势检测参数
-        self.gesture_cooldown = 0.5  # 手势触发冷却时间（秒）
-        self.last_gesture_time = 0
+        #self.gesture_cooldown = 0.5  # 手势触发冷却时间（秒）
         self.current_gesture = "静止"
         self.wait_for_reset = False
 
@@ -83,21 +83,33 @@ class gestureDetector:
 
         # 用于平滑检测的队列
         self.gesture_history = deque(maxlen=5)
+
         # 用于预测投票
         self.number_prediction_history = []
         self.gesture_prediction_history = []
-
         self.vote_size = 10
+
+        #保存最新结果(用于显示)
         self.lastest_number=None
         self.lastest_gesture=None
 
+        # 保存最新手势 用于检测手势事件
+        self.lastest_gesture_LR={
+            "Left": None,
+            "Right": None
+        }
+        self.lastest_gesture_time ={
+            "Left": 0,
+            "Right": 0
+        }
+        self.gesture_change_time_threshold = 1  # 手势变化时间阈值（秒）
 
 
         print("手势识别已初始化！")
         print("支持手势: 左滑, 右滑, 上滑, 下滑, 前推, 后拉")
 
 
-
+    #手部检测
     def detect_hands(self, frame):
         """检测手部"""
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -136,95 +148,10 @@ class gestureDetector:
 
         return self.smooth_landmarks[handedness]
 
-    def draw_hand_landmarks(self, frame, detection_result, smooth_landmarks, draw_connections=True,
-                            draw_landmarks=True, draw_indices=False):
-        """绘制手部关键点和连线"""
-        if smooth_landmarks:
-            for handedness, hand_landmarks in smooth_landmarks.items():
-                h, w, _ = frame.shape
 
-                points = []
-                for landmark in hand_landmarks:
-                    x = int(landmark[0] * w)
-                    y = int(landmark[1] * h)
-                    points.append((x, y))
 
-                if draw_connections:
-                    connections = [
-                        (0, 1), (1, 2), (2, 3), (3, 4),
-                        (0, 5), (5, 6), (6, 7), (7, 8),
-                        (0, 9), (9, 10), (10, 11), (11, 12),
-                        (0, 13), (13, 14), (14, 15), (15, 16),
-                        (0, 17), (17, 18), (18, 19), (19, 20),
-                        (5, 9), (9, 13), (13, 17)
-                    ]
-                    for connection in connections:
-                        if connection[0] < len(points) and connection[1] < len(points):
-                            cv2.line(frame, points[connection[0]],
-                                     points[connection[1]],
-                                     self.colors['connections'], 2)
-
-                if draw_landmarks:
-                    for idx, point in enumerate(points):
-                        color = self.colors['fingertips'] if idx in self.finger_tips else self.colors['landmarks']
-                        radius = 8 if idx in self.finger_tips else 4
-                        cv2.circle(frame, point, radius, color, -1)
-
-                        if draw_indices:
-                            cv2.putText(frame, str(idx), (point[0] - 10, point[1] - 10),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
-
-    def count_fingers(self, detection_result):
-        """计算伸出的手指数量"""
-        finger_counts = []
-        finger_statuses = []
-
-        if detection_result.hand_landmarks:
-            hand_labels = []
-            if hasattr(detection_result, 'handedness'):
-                for handedness in detection_result.handedness:
-                    hand_labels.append(handedness[0].category_name)
-            else:
-                hand_labels = ['Right'] * len(detection_result.hand_landmarks)
-
-            for idx, hand_landmarks in enumerate(detection_result.hand_landmarks):
-                fingers = []
-                status = []
-                landmarks = hand_landmarks
-                hand_label = hand_labels[idx] if idx < len(hand_labels) else 'Right'
-
-                thumb_tip = landmarks[self.finger_tips[0]]
-                thumb_pip = landmarks[self.finger_pips[0]]
-
-                if hand_label == 'Right':
-                    if thumb_tip.x > thumb_pip.x:
-                        fingers.append(1)
-                        status.append('伸出')
-                    else:
-                        fingers.append(0)
-                        status.append('弯曲')
-                else:
-                    if thumb_tip.x < thumb_pip.x:
-                        fingers.append(1)
-                        status.append('伸出')
-                    else:
-                        fingers.append(0)
-                        status.append('弯曲')
-
-                for i in range(1, 5):
-                    tip = landmarks[self.finger_tips[i]]
-                    pip = landmarks[self.finger_pips[i]]
-                    if tip.y < pip.y:
-                        fingers.append(1)
-                        status.append('伸出')
-                    else:
-                        fingers.append(0)
-                        status.append('弯曲')
-
-                finger_counts.append(sum(fingers))
-                finger_statuses.append(status)
-
-        return finger_counts, finger_statuses
+    
+    # 方向手势检测
 
     def get_hand_center(self, detection_result, frame_shape):
         """
@@ -263,7 +190,6 @@ class gestureDetector:
 
         return left_center, right_center
 
-    # 手势检测
     def detect_gesture(self, detection_result, frame_shape):
         """
         检测手势方向
@@ -404,6 +330,7 @@ class gestureDetector:
 
         return gesture_name, direction
     
+    #模型推理相关
     def classify_hands(self, detection_result, smoothed_hands=None, predictor=None, prediction_history=None):
         if predictor is None:
             predictor = self.predictor_number
@@ -532,7 +459,97 @@ class gestureDetector:
             })
 
         return result
+    #手势事件相关
+    def detect_gesture_event(self, gesture_predictions):
 
+        if gesture_predictions is None:
+            return []
+
+        events = []
+
+        current_time = time.time()
+
+        for prediction in gesture_predictions:
+
+            hand = prediction["handedness"]
+            gesture = prediction["gesture"]
+            confidence = prediction["confidence"]
+
+            last_gesture = self.lastest_gesture_LR[hand]
+
+            # 第一次看到这只手
+            if last_gesture is None:
+                self.lastest_gesture_LR[hand] = gesture
+                self.lastest_gesture_time[hand] = current_time
+                continue
+
+            # 没变化/
+            if gesture == last_gesture :
+                continue
+
+            if confidence is None:
+                continue
+            if confidence<0.5:
+                continue
+
+
+            # 有变化
+            dt = current_time - self.lastest_gesture_time[hand]
+
+            if dt < self.gesture_change_time_threshold:
+
+                events.append({
+                    "type": "gesture_event",
+                    "hand": hand,
+                    "from": last_gesture,
+                    "to": gesture,
+                    "time": dt
+                })
+
+            # 更新状态
+            self.lastest_gesture_LR[hand] = gesture
+            self.lastest_gesture_time[hand] = current_time
+
+        return events
+
+    #画图相关
+    def draw_hand_landmarks(self, frame, detection_result, smooth_landmarks, draw_connections=True,
+                            draw_landmarks=True, draw_indices=False):
+        """绘制手部关键点和连线"""
+        if smooth_landmarks:
+            for handedness, hand_landmarks in smooth_landmarks.items():
+                h, w, _ = frame.shape
+
+                points = []
+                for landmark in hand_landmarks:
+                    x = int(landmark[0] * w)
+                    y = int(landmark[1] * h)
+                    points.append((x, y))
+
+                if draw_connections:
+                    connections = [
+                        (0, 1), (1, 2), (2, 3), (3, 4),
+                        (0, 5), (5, 6), (6, 7), (7, 8),
+                        (0, 9), (9, 10), (10, 11), (11, 12),
+                        (0, 13), (13, 14), (14, 15), (15, 16),
+                        (0, 17), (17, 18), (18, 19), (19, 20),
+                        (5, 9), (9, 13), (13, 17)
+                    ]
+                    for connection in connections:
+                        if connection[0] < len(points) and connection[1] < len(points):
+                            cv2.line(frame, points[connection[0]],
+                                     points[connection[1]],
+                                     self.colors['connections'], 2)
+
+                if draw_landmarks:
+                    for idx, point in enumerate(points):
+                        color = self.colors['fingertips'] if idx in self.finger_tips else self.colors['landmarks']
+                        radius = 8 if idx in self.finger_tips else 4
+                        cv2.circle(frame, point, radius, color, -1)
+
+                        if draw_indices:
+                            cv2.putText(frame, str(idx), (point[0] - 10, point[1] - 10),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
     def draw_gesture_info(self, frame, detection_result, frame_shape):
         """在画面上显示手势信息"""
         gesture_name, direction = self.detect_gesture(detection_result, frame_shape)
@@ -569,63 +586,37 @@ class gestureDetector:
 
         return direction
 
-    def get_finger_positions(self, detection_result, frame_shape):
-        """获取所有关键点的像素坐标"""
-        positions = []
-        h, w = frame_shape[:2]
 
-        if detection_result.hand_landmarks:
-            for hand_landmarks in detection_result.hand_landmarks:
-                hand_positions = []
-                for landmark in hand_landmarks:
-                    x = int(landmark.x * w)
-                    y = int(landmark.y * h)
-                    z = landmark.z
-                    hand_positions.append((x, y, z))
-                positions.append(hand_positions)
 
-        return positions
-
-    def draw_finger_info(self, frame, detection_result, finger_counts, finger_statuses, predictions=None):
+    def draw_finger_info(self, frame, detection_result, finger_counts, finger_statuses):
         """显示手指信息"""
         if not detection_result.hand_landmarks:
             return
 
-        # for idx in range(len(detection_result.hand_landmarks)):
-        #     x_pos = 10
-        #     y_pos = 80 + idx * 120  # 下移位置，给手势显示留空间
+        for idx in range(len(detection_result.hand_landmarks)):
+            x_pos = 10
+            y_pos = 80 + idx * 120  # 下移位置，给手势显示留空间
 
-        #     count = finger_counts[idx] if idx < len(finger_counts) else 0
-        #     cv2.putText(frame, f"手 {idx + 1} 伸出: {count} 根手指",
-        #                 (x_pos, y_pos),
-        #                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+            count = finger_counts[idx] if idx < len(finger_counts) else 0
+            cv2.putText(frame, f"手 {idx + 1} 伸出: {count} 根手指",
+                        (x_pos, y_pos),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
 
-        #     if idx < len(finger_statuses):
-        #         status = finger_statuses[idx]
-        #         for i, (name, state) in enumerate(zip(self.finger_names, status)):
-        #             color = (0, 255, 0) if state == '伸出' else (0, 0, 255)
-        #             cv2.putText(frame, f"{name}: {state}",
-        #                         (x_pos + 10, y_pos + 25 + i * 20),
-        #                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+            if idx < len(finger_statuses):
+                status = finger_statuses[idx]
+                for i, (name, state) in enumerate(zip(self.finger_names, status)):
+                    color = (0, 255, 0) if state == '伸出' else (0, 0, 255)
+                    cv2.putText(frame, f"{name}: {state}",
+                                (x_pos + 10, y_pos + 25 + i * 20),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
 
-        if predictions:
-            self.lastest = predictions  # 获取最新的预测结果
-        if self.lastest :
-            for i, pred in enumerate(self.lastest):
-                cv2.putText(
-                    frame,
-                    f'{pred["handedness"]}: {pred["gesture"]} ({pred["confidence"]})',
-                    (20, 80 + i * 30),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.8,
-                    (0,255,255),
-                    2
-                )
+
     def draw_predictions(self, frame, number_predictions=None, gesture_predictions=None):
-        if number_predictions:
+        if number_predictions :
             self.lastest_number = number_predictions  # 获取最新的数字预测结果
         if gesture_predictions:
             self.lastest_gesture = gesture_predictions  # 获取最新的手势预测结果
+
         gesture_map = {
             "unknown": "unknown",
             0:"fist",
@@ -670,21 +661,27 @@ class gestureDetector:
 
         frame = cv2.flip(frame, 1)  # 翻转图像
         annotated_frame, detection_result, smoothed_hands = self.detect_hands(frame)
-        finger_counts, finger_statuses = self.count_fingers(detection_result)
+        #finger_counts, finger_statuses = self.count_fingers(detection_result)
         hand_count = len(detection_result.hand_landmarks)
-        positions = self.get_finger_positions(detection_result, frame.shape)
+        #positions = self.get_finger_positions(detection_result, frame.shape)
 
         self.draw_hand_landmarks(annotated_frame, detection_result, smoothed_hands)
         number_predictions = self.classify_hands(detection_result, smoothed_hands=smoothed_hands, predictor=self.predictor_number)
         gesture_predictions = self.classify_hands(detection_result, smoothed_hands=smoothed_hands, predictor=self.predictor_gesture)
 
+        gesture_event = self.detect_gesture_event(gesture_predictions)
 
+
+        #debug
+        # if gesture_event:
+        #     for event in gesture_event:
+        #         print(f"手势事件: {event['hand']} 手从 {event['from']} 变为 {event['to']}，持续时间: {event['time']:.2f} 秒")
         # if number_predictions:
         #     print("数字预测结果:", number_predictions)
         # if gesture_predictions:
         #     print("手势预测结果:", gesture_predictions)
-
         #self.draw_finger_info(annotated_frame, detection_result,finger_counts, finger_statuses, gesture_predictions)
+
         gesture_direction = self.draw_gesture_info(annotated_frame, detection_result, frame.shape)
         self.draw_predictions(annotated_frame, number_predictions=number_predictions, gesture_predictions=gesture_predictions)
         cv2.imshow("Hand Tracking", annotated_frame)
@@ -692,12 +689,13 @@ class gestureDetector:
 
         return {
         "annotated_frame": annotated_frame,
-        "gesture_direction": gesture_direction,
-        "finger_counts": finger_counts,
-        "finger_statuses": finger_statuses,
         "detection_result": detection_result,
+        "gesture_direction": gesture_direction,
+        #"finger_counts": finger_counts,
+        #"finger_statuses": finger_statuses,
         "number_predictions": number_predictions,
         "gesture_predictions": gesture_predictions,
+        "gesture_event": gesture_event,
         "hand_count": hand_count
     }
     def run(self, camera_id=0, window_name='Hand Tracking',
@@ -865,4 +863,73 @@ class gestureDetector:
                 "handedness": handedness,
                 "score": score
             }
+    
+#暂时没用的函数
+    def count_fingers(self, detection_result):
+        """计算伸出的手指数量"""
+        finger_counts = []
+        finger_statuses = []
+
+        if detection_result.hand_landmarks:
+            hand_labels = []
+            if hasattr(detection_result, 'handedness'):
+                for handedness in detection_result.handedness:
+                    hand_labels.append(handedness[0].category_name)
+            else:
+                hand_labels = ['Right'] * len(detection_result.hand_landmarks)
+
+            for idx, hand_landmarks in enumerate(detection_result.hand_landmarks):
+                fingers = []
+                status = []
+                landmarks = hand_landmarks
+                hand_label = hand_labels[idx] if idx < len(hand_labels) else 'Right'
+
+                thumb_tip = landmarks[self.finger_tips[0]]
+                thumb_pip = landmarks[self.finger_pips[0]]
+
+                if hand_label == 'Right':
+                    if thumb_tip.x > thumb_pip.x:
+                        fingers.append(1)
+                        status.append('伸出')
+                    else:
+                        fingers.append(0)
+                        status.append('弯曲')
+                else:
+                    if thumb_tip.x < thumb_pip.x:
+                        fingers.append(1)
+                        status.append('伸出')
+                    else:
+                        fingers.append(0)
+                        status.append('弯曲')
+
+                for i in range(1, 5):
+                    tip = landmarks[self.finger_tips[i]]
+                    pip = landmarks[self.finger_pips[i]]
+                    if tip.y < pip.y:
+                        fingers.append(1)
+                        status.append('伸出')
+                    else:
+                        fingers.append(0)
+                        status.append('弯曲')
+
+                finger_counts.append(sum(fingers))
+                finger_statuses.append(status)
+
+        return finger_counts, finger_statuses
+    def get_finger_positions(self, detection_result, frame_shape):
+        """获取所有关键点的像素坐标"""
+        positions = []
+        h, w = frame_shape[:2]
+
+        if detection_result.hand_landmarks:
+            for hand_landmarks in detection_result.hand_landmarks:
+                hand_positions = []
+                for landmark in hand_landmarks:
+                    x = int(landmark.x * w)
+                    y = int(landmark.y * h)
+                    z = landmark.z
+                    hand_positions.append((x, y, z))
+                positions.append(hand_positions)
+
+        return positions
 
