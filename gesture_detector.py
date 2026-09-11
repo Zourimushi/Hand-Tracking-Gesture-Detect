@@ -62,23 +62,27 @@ class gestureDetector:
         # 用于平滑关键点
         self.smooth_landmarks = {}
         # EMA参数
-        self.alpha = 0.3
+        self.alpha = 0.6
 
         # ===== 新增：手势检测相关变量 =====
         # 存储最近的手部中心点位置（用于检测移动方向）
         self.hand_positions_history = {}
-        self.history_length = 4  # 保存最近4帧的位置
+        self.history_length = 5  # 保存最近5帧的位置
 
         # 手势检测参数
         #self.gesture_cooldown = 0.5  # 手势触发冷却时间（秒）
-        self.current_gesture = "静止"
-        self.wait_for_reset = False
+        self.current_gesture = 0  # 当前手势
 
         # 移动阈值（像素）
-        self.move_threshold = 15
+        self.move_threshold = 10
         #速度阈值（像素/秒）
         self.velocity_threshold = 150
         self.reset_velocity = 100          # 恢复阈值
+
+        self.wait_for_reset = False
+        self.reset_frame_count = 0  
+        self.reset_required_frames = 10  # 连续帧数达到阈值才恢复
+        
 
 
         # 用于平滑检测的队列
@@ -88,6 +92,7 @@ class gestureDetector:
         self.number_prediction_history = []
         self.gesture_prediction_history = []
         self.vote_size = 10
+
 
         #保存最新结果(用于显示)
         self.lastest_number=None
@@ -173,11 +178,40 @@ class gestureDetector:
 
         for i, hand_landmarks in enumerate(detection_result.hand_landmarks):
 
+            # finger_tips = [
+            #     hand_landmarks[0],
+            #     hand_landmarks[1],
+            #     hand_landmarks[2],
+            #     hand_landmarks[5],
+            #     hand_landmarks[9],
+            #     hand_landmarks[13],
+            #     hand_landmarks[17]
+            # ]
+
+            # finger_tips = [
+            #     hand_landmarks[8],
+            #     hand_landmarks[12],
+            #     hand_landmarks[16],
+            #     hand_landmarks[20],
+            #     hand_landmarks[6],
+            #     hand_landmarks[14],
+            #     hand_landmarks[18],
+            #     hand_landmarks[20],
+            # ]
+            finger_tips = [
+                hand_landmarks[0],
+                hand_landmarks[5],
+                hand_landmarks[9],
+                hand_landmarks[13],
+                hand_landmarks[17],
+  
+            ]
+
             wrist = hand_landmarks[0]
             index_base = hand_landmarks[5]
 
-            center_x = int((wrist.x + index_base.x) * 0.5 * w)
-            center_y = int((wrist.y + index_base.y) * 0.5 * h)
+            center_x = int(sum(point.x for point in finger_tips) / len(finger_tips) * w)
+            center_y = int(sum(point.y for point in finger_tips) / len(finger_tips) * h)
 
             handedness = "Right"
             if hasattr(detection_result, "handedness"):
@@ -197,14 +231,26 @@ class gestureDetector:
         方向: 'left', 'right', 'up', 'down', 'forward', 'backward', 'none'
         """
         if not detection_result.hand_landmarks:
-            return '无手势', 'none'
+            return '无手势-未检测到landmarks', 'none'
 
         left_center, right_center = self.get_hand_center(detection_result, frame_shape)
-        if not left_center and not right_center:
-            return '无手势', 'none'
 
         # 优先使用左手中心，如果没有则使用右手中心
-        center = left_center if left_center else right_center
+        #center = left_center if left_center else right_center
+
+        # 只追踪左手
+        center = left_center
+
+        if not left_center and not right_center:
+            self.hand_positions_history.clear()
+            self.wait_for_reset = False
+            return '无手势-未检测到任何手', 'none'
+
+
+        # 没有检测到左手，直接不进行方向判断
+        if center is None:
+            return '无手势-未检测到左手', 'none'
+        
         hand_id = 0
 
         # 更新位置历史
@@ -219,23 +265,11 @@ class gestureDetector:
 
         self.hand_positions_history[hand_id].append({"pos": center,"time": time.time()})
 
-        # # 计算手的大小（手腕到中指指尖的距离）
-        # if detection_result.hand_landmarks:
-        #     hand_landmarks = detection_result.hand_landmarks[0]
-        #     wrist = hand_landmarks[0]
-        #     middle_tip = hand_landmarks[12]  # 中指指尖
-        #     h, w = frame_shape[:2]
-
-        #     # 计算欧几里得距离
-        #     dx = (middle_tip.x - wrist.x) * w
-        #     dy = (middle_tip.y - wrist.y) * h
-        #     hand_size = np.sqrt(dx * dx + dy * dy)
-        #     self.hand_size_history[hand_id].append(hand_size)
 
         history = self.hand_positions_history[hand_id]
 
-        if len(history) < 4:
-            return "检测中...", "none"
+        if len(history) < self.history_length:
+            return "history少 检测中...", "none"
 
         # -------------------------
         # 计算最近3帧速度
@@ -266,7 +300,7 @@ class gestureDetector:
             })
 
         if len(velocities) == 0:
-            return "检测中...", "none"
+            return "22检测中...", "none"
 
         # -------------------------
         # 最近3帧平均速度
@@ -286,8 +320,13 @@ class gestureDetector:
 
         if self.wait_for_reset:
 
-            if avg_velocity < self.reset_velocity:
+            # if avg_velocity < self.reset_velocity:
+            #     self.wait_for_reset = False
+            self.reset_frame_count += 1
+
+            if self.reset_frame_count >= self.reset_required_frames:
                 self.wait_for_reset = False
+                self.reset_frame_count = 0
 
             return "等待恢复", "none"
 
@@ -325,8 +364,13 @@ class gestureDetector:
         # -------------------------
         # 锁住，等待恢复
         # -------------------------
-
         self.wait_for_reset = True
+
+
+
+        #print(f"self.current_gesture: {self.current_gesture}")
+        if self.current_gesture != 5 :
+            return '无手势-不是手掌', 'none'
 
         return gesture_name, direction
     
@@ -381,7 +425,13 @@ class gestureDetector:
                     pred["gesture"] = gesture
                     pred["confidence"] = confidence
                     break
+                
 
+        for pred in frame_predictions:
+            if pred["handedness"] == "Left":
+                self.current_gesture = pred["gesture"]
+
+        #print("当前手势:", self.current_gesture)
         # # 保存这一帧
         prediction_history.append(frame_predictions)
 
